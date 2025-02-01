@@ -23,7 +23,7 @@ DEXSCREENER_API_URL = 'https://api.dexscreener.com/latest/dex/search'
 client = TelegramClient('session_name', api_id, api_hash)
 
 # === TRACK BOUGHT TOKENS ===
-bought_coins = {"fwog","vine","miggles","alpha","benji","trump","melania","butthole","botify"}
+bought_coins = {"fwog","vine","miggles","alpha","benji","trump","melania","butthole","botify","fartcoin","jup","ray"}
 
 async def fetch_solana_balance(wallet_address):
     """Fetch balance of the Solana wallet address."""
