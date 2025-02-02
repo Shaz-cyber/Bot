@@ -12,7 +12,7 @@ api_hash = '6c2358b0acd76bb7bfaf9c2acd260127'
 phone_number = '+918979351556'
 
 # === GROUP IDS ===
-main_group_id = -1002301815227  # Main group where tokens are announced
+main_group_id = -1002404342613 # Main group where tokens are announced
 trojan_bot_username = '@solana_trojanbot'  # Trojan bot username
 third_group_id = -4794132629  # Group where the confirmation message is sent (@shazhusain)
 
@@ -23,21 +23,10 @@ DEXSCREENER_API_URL = 'https://api.dexscreener.com/latest/dex/search'
 client = TelegramClient('session_name', api_id, api_hash)
 
 # === TRACK BOUGHT TOKENS ===
-bought_coins = {"fwog","vine","miggles","alpha","benji","trump","melania","butthole","botify","fartcoin","jup","ray"}
+bought_coins = {}  # Track bought tokens by name and contract address
 
-async def fetch_solana_balance(wallet_address):
-    """Fetch balance of the Solana wallet address."""
-    try:
-        response = requests.post(
-            SOLANA_RPC_URL,
-            json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [wallet_address]},
-            headers={"Content-Type": "application/json"}
-        )
-        balance = response.json().get('result', {}).get('value', 0)
-        return balance / 1e9  # Convert lamports to SOL
-    except Exception as e:
-        print(f"❌ Error fetching Solana balance: {e}")
-        return None
+# === COINS TO AVOID ===
+avoid_coins = {"fwog", "alpha","vine","miggles","trump","Melania","butthole","fartcoin","Benji","botify"}  # Coins we don't want to buy
 
 async def fetch_token_data(symbol):
     """Fetch the contract address of a token if it meets liquidity and volume criteria."""
@@ -54,13 +43,18 @@ async def fetch_token_data(symbol):
                 # Ensure the token is on Solana and meets both liquidity and volume requirements
                 if pair['chainId'] == 'solana' and liquidity >= 100000 and volume_24h >= 10000:
                     print(f"✅ {symbol}: Liquidity = ${liquidity}, 24h Volume = ${volume_24h} (PASS)")
-                    return pair['baseToken']['address']
+                    return pair['baseToken']['address'], pair['baseToken']['name']  # Return both address and name
                 else:
                     print(f"❌ {symbol}: Liquidity = ${liquidity}, 24h Volume = ${volume_24h} (FAIL)")
     except Exception as e:
         print(f"❌ Error fetching contract for {symbol}: {e}")
     
-    return None
+    return None, None
+
+def extract_solana_address(text):
+    """Extracts Solana contract address from the message."""
+    match = re.search(r'\b[A-Za-z0-9]{32,44}\b', text)  # Solana addresses are typically 32 to 44 characters long
+    return match.group() if match else None
 
 async def click_sol_and_forward(symbol, contract_address):
     """Click 'SOL ✏️' and forward number from third group."""
@@ -109,33 +103,69 @@ async def click_sol_and_forward(symbol, contract_address):
 
 @client.on(events.NewMessage)
 async def handle_new_message(event):
-    """Monitors the main group for token symbols and interacts with Trojan Bot."""
+    """Monitors the main group for token symbols and contract addresses."""
     if event.chat_id != main_group_id:
         return
 
     message = event.message.text
     print(f"📥 New message detected: {message}")
 
+    # Extract token symbol (e.g., $alpha)
     coin_symbols = [s for s in re.findall(r'\$(\w+)', message) if not s[0].isdigit()]
 
-    for symbol in coin_symbols:
-        if symbol in bought_coins:
-            print(f"🔄 Skipping {symbol}, already processed.")
-            continue
+    # Extract contract address
+    contract_address = extract_solana_address(message)
 
-        # **Fetch Data in Parallel for Speed**
-        contract_address, solana_balance = await asyncio.gather(
-            fetch_token_data(symbol),
-            fetch_solana_balance("CsUZFwXSkVkEaFKYfSLjCCatoTD9g986seP293oEHw5r")
-        )
+    # Check if coin has already been bought (by name)
+    def is_coin_bought_by_name(token_name):
+        """Check if the coin has already been bought by name."""
+        if token_name in bought_coins:
+            print(f"🔄 Skipping {token_name}, already processed.")
+            return True
+        return False
 
-        if contract_address and solana_balance is not None:
-            print(f"💰 Balance: {solana_balance} SOL | Processing {symbol}")
-            bought_coins.add(symbol)
-            await click_sol_and_forward(symbol, contract_address)
+    if contract_address:
+        # If contract address is found, prioritize it
+        token_name = None
+        for symbol in coin_symbols:
+            # Fetch token data (contract address and token name)
+            ca, name = await fetch_token_data(symbol)
+
+            if ca == contract_address:
+                token_name = name
+                break
+        
+        if token_name and not is_coin_bought_by_name(token_name) and token_name.lower() not in avoid_coins:
+            # Mark as bought by token name and CA
+            bought_coins[token_name] = contract_address
+            print(f"💰 Bought {token_name} with contract {contract_address}")
+            await click_sol_and_forward(token_name, contract_address)
         else:
-            print(f"❌ Skipping {symbol}, contract not found or insufficient balance.")
+            print(f"❌ Skipping {token_name} (either already bought or in the avoid list).")
+        # Wait for a moment before checking the $ symbol (to ensure CA is processed)
+        await asyncio.sleep(2)  # Delay to allow the bought coin to be added
 
+    else:
+        # If no contract address, proceed with symbol
+        for symbol in coin_symbols:
+            token_name = symbol.lower()
+
+            if is_coin_bought_by_name(token_name) or token_name in avoid_coins:
+                continue
+
+            # Fetch token data from Dexscreener API for the $ symbol
+            contract_address, token_name = await fetch_token_data(symbol)
+
+            if contract_address:
+                print(f"💰 Processing {symbol} with contract {contract_address}")
+                # Check if this coin is already bought with CA (to avoid duplicate purchases)
+                if is_coin_bought_by_name(token_name):
+                    print(f"🔄 Skipping {symbol}, already processed by CA.")
+                else:
+                    bought_coins[token_name] = contract_address  # Mark as bought by token name and CA
+                    await click_sol_and_forward(symbol, contract_address)
+            else:
+                print(f"❌ Skipping {symbol}, contract not found or insufficient liquidity/volume.")
 
 async def main():
     """Starts the Telegram client and begins monitoring."""
