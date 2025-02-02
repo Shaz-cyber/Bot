@@ -1,6 +1,7 @@
 import requests
 import re
 import asyncio
+import time
 from telethon import TelegramClient, events
 
 # === SOLANA RPC URL ===
@@ -23,156 +24,110 @@ DEXSCREENER_API_URL = 'https://api.dexscreener.com/latest/dex/search'
 client = TelegramClient('session_name', api_id, api_hash)
 
 # === TRACK BOUGHT TOKENS ===
-bought_coins = {}  # Track bought tokens by name and contract address
+bought_coins = set()  # Use a set for O(1) lookup time
 
-# === COINS TO AVOID ===
+# === COINS TO AVOID (Lowercase for Fast Lookups) ===
 avoid_coins = {"fwog", "alpha","vine","miggles","trump","Melania","butthole","fartcoin","Benji","botify"}  # Coins we don't want to buy
 
 async def fetch_token_data(symbol):
-    """Fetch the contract address of a token if it meets liquidity and volume criteria."""
+    """Fetch contract address, ensuring liquidity and volume requirements are met."""
     url = f"{DEXSCREENER_API_URL}?q={symbol}"
-    
     try:
         response = requests.get(url)
         if response.status_code == 200:
-            data = response.json().get('pairs', [])
-            for pair in data:
+            for pair in response.json().get('pairs', []):
                 liquidity = pair.get('liquidity', {}).get('usd', 0)
-                volume_24h = pair.get('volume', {}).get('h24', 0)  # Fetch 24-hour volume
-                
-                # Ensure the token is on Solana and meets both liquidity and volume requirements
+                volume_24h = pair.get('volume', {}).get('h24', 0)
                 if pair['chainId'] == 'solana' and liquidity >= 100000 and volume_24h >= 10000:
-                    print(f"✅ {symbol}: Liquidity = ${liquidity}, 24h Volume = ${volume_24h} (PASS)")
-                    return pair['baseToken']['address'], pair['baseToken']['name']  # Return both address and name
-                else:
-                    print(f"❌ {symbol}: Liquidity = ${liquidity}, 24h Volume = ${volume_24h} (FAIL)")
+                    return pair['baseToken']['address'], pair['baseToken']['name']
     except Exception as e:
-        print(f"❌ Error fetching contract for {symbol}: {e}")
-    
+        print(f"❌ Error fetching {symbol}: {e}")
     return None, None
 
-def extract_solana_address(text):
-    """Extracts Solana contract address from the message."""
-    match = re.search(r'\b[A-Za-z0-9]{32,44}\b', text)  # Solana addresses are typically 32 to 44 characters long
-    return match.group() if match else None
-
 async def click_sol_and_forward(symbol, contract_address):
-    """Click 'SOL ✏️' and forward number from third group."""
+    """Clicks 'SOL ✏️' and sends message immediately after success."""
     try:
-        print(f"📩 Sending contract for {symbol}: {contract_address}")
+        print(f"📩 Sending contract: {contract_address}")
         await client.send_message(trojan_bot_username, contract_address)
 
-        # **Look for the 'SOL ✏️' Button Quickly with Retries**
-        for attempt in range(5):  # Retry up to 5 times
+        retries = 5  # Number of retry attempts if button doesn't click
+        clicked = False  # Flag to check if the button has been clicked
+
+        # Retry loop for 5 attempts
+        for _ in range(retries):
             async for message in client.iter_messages(trojan_bot_username, limit=3):
                 if message.buttons:
                     for row in message.buttons:
                         for button in row:
                             if "SOL ✏️" in button.text:
-                                print(f"✅ Found 'SOL ✏️' for {symbol}, clicking...")
                                 await button.click()
-                                break
-                        else:
-                            continue
-                        break
-                    else:
-                        continue
-                    break
-                await asyncio.sleep(1)  # 1-second retry delay between attempts
+                                clicked = True
+                                print(f"✅ Clicked 'SOL ✏️' for {symbol}")
+                                # Send message from the third group immediately after the click
+                                async for message in client.iter_messages(third_group_id, limit=1):
+                                    latest_message = message.text
+                                    if latest_message:
+                                        print(f"📤 Forwarding message: {latest_message}")
+                                        await client.send_message(trojan_bot_username, latest_message)
+                                return  # Exit after successful click and forwarding message
 
-            else:
-                print(f"❌ 'SOL ✏️' button not found after {attempt + 1} attempts for {symbol}")
-                continue
-            break
+            # Retry if button is not found
+            if not clicked:
+                print(f"🔄 Retrying SOL ✏️ click for {symbol}...")
+                await asyncio.sleep(0.5)
 
-        # **Fetch the Latest Numeric Message from Third Group (Whole & Decimal Numbers)**
-        async for response_message in client.iter_messages(third_group_id, limit=5):
-            match = re.search(r'\b\d+(\.\d+)?\b', response_message.text)  # Match whole & decimal numbers
-            if match:
-                number_to_forward = match.group()
-                print(f"📨 Forwarding number {number_to_forward} to Trojan bot...")
-                await client.send_message(trojan_bot_username, number_to_forward)
-                print(f"✅ Successfully forwarded {number_to_forward} for {symbol}")
-                return
-
-        print("❌ No valid number found in third group!")
+        print(f"❌ Failed to click SOL ✏️ after {retries} attempts for {symbol}")
 
     except Exception as e:
-        print(f"❌ Error clicking 'SOL ✏️' or forwarding for {symbol}: {e}")
-
+        print(f"❌ Error clicking SOL or sending message for {symbol}: {e}")
 
 @client.on(events.NewMessage)
 async def handle_new_message(event):
-    """Monitors the main group for token symbols and contract addresses."""
+    """Processes new messages from the main group."""
     if event.chat_id != main_group_id:
         return
 
     message = event.message.text
-    print(f"📥 New message detected: {message}")
+    print(f"📥 Message received: {message}")
 
-    # Extract token symbol (e.g., $alpha)
-    coin_symbols = [s for s in re.findall(r'\$(\w+)', message) if not s[0].isdigit()]
+    # Extract symbols prefixed with `$` and numbers (including decimals)
+    coin_symbols = {s.lower() for s in re.findall(r'\$(\w+)', message) if not s[0].isdigit()}
+    numbers = {s for s in re.findall(r'\b\d+(\.\d+)?\b', message)}  # Capturing numbers with decimals
 
-    # Extract contract address
-    contract_address = extract_solana_address(message)
+    # **Skip if any excluded coin is found**
+    if avoid_coins & coin_symbols:
+        print(f"⛔ Excluded coins detected: {avoid_coins & coin_symbols}")
+        return  
 
-    # Check if coin has already been bought (by name)
-    def is_coin_bought_by_name(token_name):
-        """Check if the coin has already been bought by name."""
-        if token_name in bought_coins:
-            print(f"🔄 Skipping {token_name}, already processed.")
-            return True
-        return False
+    # **Skip already bought tokens**
+    coin_symbols -= bought_coins  
 
-    if contract_address:
-        # If contract address is found, prioritize it
-        token_name = None
-        for symbol in coin_symbols:
-            # Fetch token data (contract address and token name)
-            ca, name = await fetch_token_data(symbol)
+    if not coin_symbols and not numbers:
+        print("🔄 No new tokens or numbers to process.")
+        return
 
-            if ca == contract_address:
-                token_name = name
-                break
-        
-        if token_name and not is_coin_bought_by_name(token_name) and token_name.lower() not in avoid_coins:
-            # Mark as bought by token name and CA
-            bought_coins[token_name] = contract_address
-            print(f"💰 Bought {token_name} with contract {contract_address}")
-            await click_sol_and_forward(token_name, contract_address)
+    # **Fetch contracts in parallel for coins**
+    tasks = [fetch_token_data(symbol) for symbol in coin_symbols]
+    results = await asyncio.gather(*tasks)
+
+    for symbol, (contract, token_name) in zip(coin_symbols, results):
+        if contract:
+            bought_coins.add(symbol)
+            await click_sol_and_forward(symbol, contract)
         else:
-            print(f"❌ Skipping {token_name} (either already bought or in the avoid list).")
-        # Wait for a moment before checking the $ symbol (to ensure CA is processed)
-        await asyncio.sleep(2)  # Delay to allow the bought coin to be added
+            print(f"❌ Skipping {symbol}, contract not found.")
 
-    else:
-        # If no contract address, proceed with symbol
-        for symbol in coin_symbols:
-            token_name = symbol.lower()
-
-            if is_coin_bought_by_name(token_name) or token_name in avoid_coins:
-                continue
-
-            # Fetch token data from Dexscreener API for the $ symbol
-            contract_address, token_name = await fetch_token_data(symbol)
-
-            if contract_address:
-                print(f"💰 Processing {symbol} with contract {contract_address}")
-                # Check if this coin is already bought with CA (to avoid duplicate purchases)
-                if is_coin_bought_by_name(token_name):
-                    print(f"🔄 Skipping {symbol}, already processed by CA.")
-                else:
-                    bought_coins[token_name] = contract_address  # Mark as bought by token name and CA
-                    await click_sol_and_forward(symbol, contract_address)
-            else:
-                print(f"❌ Skipping {symbol}, contract not found or insufficient liquidity/volume.")
+    # **Handle numbers if present**
+    if numbers:
+        for number in numbers:
+            print(f"📤 Sending number: {number}")
+            await client.send_message(trojan_bot_username, number)
 
 async def main():
-    """Starts the Telegram client and begins monitoring."""
+    """Starts Telegram client and monitoring."""
     await client.start(phone_number)
     print(f"👀 Monitoring main group: {main_group_id}")
     await client.run_until_disconnected()
-
 
 if __name__ == '__main__':
     asyncio.run(main())
