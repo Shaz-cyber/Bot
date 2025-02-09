@@ -52,8 +52,20 @@ async def fetch_integer_from_third_group():
     print("⚠️ No valid integer message found.")
     return None
 
+async def is_sol_button_disappeared():
+    """Checks if the 'SOL ✏️' button has disappeared from Trojan bot chat."""
+    async for msg in client.iter_messages(trojan_bot_username, limit=5):
+        if msg.buttons:
+            for row in msg.buttons:
+                for button in row:
+                    if "SOL ✏" in button.text:
+                        print("⚠️ 'SOL ✏️' button is still visible, retrying...")
+                        return False
+    print("✅ 'SOL ✏️' button has disappeared. Proceeding...")
+    return True
+
 async def click_sol_and_forward(contract_address, token_ticker):
-    """Buys token using Trojan bot and forwards confirmation."""
+    """Buys token using Trojan bot and ensures confirmation before proceeding."""
     if contract_address in bought_tokens:
         print(f"❌ Already bought with CA: {contract_address}")
         return
@@ -61,8 +73,8 @@ async def click_sol_and_forward(contract_address, token_ticker):
     await client.send_message(trojan_bot_username, "/buy")
     await asyncio.sleep(0.2)
     await client.send_message(trojan_bot_username, contract_address)
-    
-    retries = 5
+
+    retries = 10
     for _ in range(retries):
         async for message in client.iter_messages(trojan_bot_username, limit=3):
             if message.buttons:
@@ -71,9 +83,9 @@ async def click_sol_and_forward(contract_address, token_ticker):
                         if "SOL ✏" in button.text:
                             await button.click()
                             print(f"✅ Clicked 'SOL ✏' for CA: {contract_address}")
-                            
-                            # **Added 0.5s delay after clicking to allow system to catch up**
-                            await asyncio.sleep(0.5)
+
+                            # **Wait 1 second before forwarding integer**
+                            await asyncio.sleep(1.0)
 
                             # Fetch integer message from the third group
                             integer_msg = await fetch_integer_from_third_group()
@@ -81,12 +93,23 @@ async def click_sol_and_forward(contract_address, token_ticker):
                                 await client.send_message(trojan_bot_username, integer_msg)
                                 print(f"✅ Forwarded integer {integer_msg} to Trojan bot")
 
-                            bought_tokens[contract_address] = token_ticker.lower()
-                            bought_tokens[token_ticker.lower()] = contract_address
-                            return
+                                # **Check if 'SOL ✏️' disappears before confirming**
+                                for _ in range(10):  # Retry up to 10 times
+                                    await asyncio.sleep(0.5)
+                                    if await is_sol_button_disappeared():
+                                        bought_tokens[contract_address] = token_ticker.lower()
+                                        bought_tokens[token_ticker.lower()] = contract_address
+                                        return
+
+                                    # **If still visible, click again and resend integer**
+                                    await button.click()
+                                    await asyncio.sleep(0.5)
+                                    await client.send_message(trojan_bot_username, integer_msg)
+                                    print(f"🔄 Retried 'SOL ✏' click and resent integer {integer_msg}")
+
         await asyncio.sleep(0.2)
     
-    print(f"❌ Failed to click 'SOL ✏' after {retries} attempts for CA: {contract_address}")
+    print(f"❌ Failed to complete purchase after {retries} attempts for CA: {contract_address}")
 
 @client.on(events.NewMessage)
 async def handle_new_message(event):
@@ -103,7 +126,6 @@ async def handle_new_message(event):
     if contract_match:
         contract_address = contract_match.group(1)
 
-        # Prevent false "Already Bought" messages
         if contract_address in bought_tokens:
             print(f"❌ Already bought with CA: {contract_address}")
             return
@@ -115,7 +137,6 @@ async def handle_new_message(event):
         print(f"⛔ Excluded coins detected: {avoid_coins & coin_symbols}")
         return  
 
-    # Remove already bought tokens before checking DEX
     coin_symbols -= set(bought_tokens.keys())
 
     if not coin_symbols:
@@ -127,7 +148,6 @@ async def handle_new_message(event):
 
     for symbol, (contract, token_ticker) in zip(coin_symbols, results):
         if contract:
-            # Ensure it's not marked as "already bought" unless it actually is
             if contract in bought_tokens:
                 print(f"❌ Already bought {token_ticker} with CA: {contract}")
                 continue
