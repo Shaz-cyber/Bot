@@ -16,58 +16,45 @@ main_group_id = -1002404342613  # Main group ID
 trojan_bot_username = '@solana_trojanbot'  # Trojan bot username
 third_group_id = -4794132629  # Confirmation group (@shazhusain)
 
-# === DEXSCREENER API ===
-DEXSCREENER_API_URL = 'https://api.dexscreener.com/latest/dex/search'
-
 # === INITIALIZE TELEGRAM CLIENT ===
 client = TelegramClient('session_name', api_id, api_hash)
 
-# === TRACK BOUGHT TOKENS ===
-bought_tokens = {}  # {contract: ticker, ticker: contract}
+# === TRACK PURCHASED CONTRACT ADDRESSES (CAs) ===
+bought_contracts = set()  # Stores purchased contract addresses
 
-# === COINS TO AVOID (Lowercase for Fast Lookups) ===
-avoid_coins = {"fwog", "alpha", "vine", "miggles", "trump", "melania", "butthole", "fartcoin", "benji", "botify"}
+# === COINS TO AVOID (Now Using Contract Addresses) ===
+excluded_contracts = {"2sCUCJdVkmyXp4dT8sFaA9LKgSMK4yDPi9zLHiwXpump","EgMF2iEbKv984fWtqakZ12k4VQvJubTNnU2Y9durpump","EsP4kJfKUDLfX274WoBSiiEy74Sh4tZKUCDjfULHpump"
+   
+}
 
-async def fetch_token_data(symbol):
-    """Fetch contract address ensuring liquidity and volume requirements."""
-    url = f"{DEXSCREENER_API_URL}?q={symbol}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            for pair in response.json().get('pairs', []):
-                liquidity = pair.get('liquidity', {}).get('usd', 0)
-                volume_24h = pair.get('volume', {}).get('h24', 0)
-                if pair['chainId'] == 'solana' and liquidity >= 100000 and volume_24h >= 10000:
-                    return pair['baseToken']['address'], pair['baseToken']['symbol']
-    except Exception as e:
-        print(f"❌ Error fetching {symbol}: {e}")
-    return None, None
-
-async def fetch_integer_from_third_group():
-    """Fetches the first integer-only message from the third group."""
-    async for msg in client.iter_messages(third_group_id, limit=5):
-        if msg.text.isdigit():
-            print(f"📨 Received integer message: {msg.text}")
-            return msg.text
-    print("⚠️ No valid integer message found.")
+async def fetch_latest_number_from_third_group():
+    """Fetches the latest numerical message (integer or float) from the last 3 messages in the third group."""
+    async for msg in client.iter_messages(third_group_id, limit=3):
+        match = re.search(r'\b\d+(?:\.\d+)?\b', msg.text)
+        if match:
+            latest_number = match.group(0)  # Capture full number including decimals
+            print(f"📨 Found latest numerical message: {latest_number}")
+            return latest_number
+    
+    print("⚠ No valid numerical message found in the last 3 messages.")
     return None
 
 async def is_sol_button_disappeared():
-    """Checks if the 'SOL ✏️' button has disappeared from Trojan bot chat."""
+    """Checks if the 'SOL ✏' button has disappeared from Trojan bot chat."""
     async for msg in client.iter_messages(trojan_bot_username, limit=5):
         if msg.buttons:
             for row in msg.buttons:
                 for button in row:
                     if "SOL ✏" in button.text:
-                        print("⚠️ 'SOL ✏️' button is still visible, retrying...")
+                        print("⚠ 'SOL ✏' button is still visible, retrying...")
                         return False
-    print("✅ 'SOL ✏️' button has disappeared. Proceeding...")
+    print("✅ 'SOL ✏' button has disappeared. Proceeding...")
     return True
 
-async def click_sol_and_forward(contract_address, token_ticker):
+async def click_sol_and_forward(contract_address):
     """Buys token using Trojan bot and ensures confirmation before proceeding."""
-    if contract_address in bought_tokens:
-        print(f"❌ Already bought with CA: {contract_address}")
+    if contract_address in bought_contracts or contract_address in excluded_contracts:
+        print(f"❌ Already bought or excluded CA: {contract_address}")
         return
     
     await client.send_message(trojan_bot_username, "/buy")
@@ -84,28 +71,27 @@ async def click_sol_and_forward(contract_address, token_ticker):
                             await button.click()
                             print(f"✅ Clicked 'SOL ✏' for CA: {contract_address}")
 
-                            # **Wait 1 second before forwarding integer**
-                            await asyncio.sleep(1.0)
+                            # *Wait 1 second before forwarding number*
+                            await asyncio.sleep(0.3)
 
-                            # Fetch integer message from the third group
-                            integer_msg = await fetch_integer_from_third_group()
-                            if integer_msg:
-                                await client.send_message(trojan_bot_username, integer_msg)
-                                print(f"✅ Forwarded integer {integer_msg} to Trojan bot")
+                            # Fetch latest numerical message from the third group
+                            number_msg = await fetch_latest_number_from_third_group()
+                            if number_msg:
+                                await client.send_message(trojan_bot_username, number_msg)
+                                print(f"✅ Forwarded latest number {number_msg} to Trojan bot")
 
-                                # **Check if 'SOL ✏️' disappears before confirming**
+                                # *Check if 'SOL ✏' disappears before confirming*
                                 for _ in range(10):  # Retry up to 10 times
-                                    await asyncio.sleep(0.5)
+                                    await asyncio.sleep(0.3)
                                     if await is_sol_button_disappeared():
-                                        bought_tokens[contract_address] = token_ticker.lower()
-                                        bought_tokens[token_ticker.lower()] = contract_address
+                                        bought_contracts.add(contract_address)  # Save CA
                                         return
 
-                                    # **If still visible, click again and resend integer**
+                                    # *If still visible, click again and resend number*
                                     await button.click()
                                     await asyncio.sleep(0.5)
-                                    await client.send_message(trojan_bot_username, integer_msg)
-                                    print(f"🔄 Retried 'SOL ✏' click and resent integer {integer_msg}")
+                                    await client.send_message(trojan_bot_username, number_msg)
+                                    print(f"🔄 Retried 'SOL ✏' click and resent number {number_msg}")
 
         await asyncio.sleep(0.2)
     
@@ -121,39 +107,18 @@ async def handle_new_message(event):
     print(f"📥 Message received: {message}")
     
     contract_match = re.search(r'([1-9A-HJ-NP-Za-km-z]{32,44})', message)
-    coin_symbols = {s.lower() for s in re.findall(r'\$(\w+)', message) if not s[0].isdigit()}
 
     if contract_match:
         contract_address = contract_match.group(1)
 
-        if contract_address in bought_tokens:
-            print(f"❌ Already bought with CA: {contract_address}")
+        if contract_address in bought_contracts or contract_address in excluded_contracts:
+            print(f"❌ Already bought or excluded CA: {contract_address}")
             return
         
-        await click_sol_and_forward(contract_address, "Unknown")
+        await click_sol_and_forward(contract_address)
         return
 
-    if avoid_coins & coin_symbols:
-        print(f"⛔ Excluded coins detected: {avoid_coins & coin_symbols}")
-        return  
-
-    coin_symbols -= set(bought_tokens.keys())
-
-    if not coin_symbols:
-        print("🔄 No new tokens to process.")
-        return
-
-    tasks = [fetch_token_data(symbol) for symbol in coin_symbols]
-    results = await asyncio.gather(*tasks)
-
-    for symbol, (contract, token_ticker) in zip(coin_symbols, results):
-        if contract:
-            if contract in bought_tokens:
-                print(f"❌ Already bought {token_ticker} with CA: {contract}")
-                continue
-            await click_sol_and_forward(contract, token_ticker)
-        else:
-            print(f"⚠️ {symbol} not found on DexScreener, skipping purchase due to liquidity/volume filter.")
+    print("🔄 No valid contract address found in message.")
 
 async def main():
     await client.start(phone_number)
